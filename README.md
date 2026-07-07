@@ -96,6 +96,29 @@ The CLI writes CorefUD-style CONLL-U to stdout.
 - `src/render.rs`: CONLL-U rendering
 - `src/main.rs`: thin CLI wrapper
 
+## Converting the CorPipe checkpoint for Candle
+
+The original CorPipe 25 release stores its model weights as a PyTorch checkpoint, `model.pt`. For the Rust/Candle implementation, this checkpoint needs to be converted to `safetensors`, since Candle can load `safetensors` directly but does not load arbitrary PyTorch pickle checkpoints. We converted the CorPipe base model, `ufal/corpipe25-corefud1.3-base-251101`, by loading `model.pt` with PyTorch on CPU, extracting the state dictionary, cloning tensors to remove shared-storage aliases, and saving the result as `model.safetensors`. The original checkpoint contains tied embedding tensors, `_encoder.shared.weight` and `_encoder.encoder.embed_tokens.weight`; because these share memory, `safetensors` refuses to save both as-is. We keep `_encoder.encoder.embed_tokens.weight`, which is the name used by the Rust/Candle loader, and drop `_encoder.shared.weight` before saving.
+
+Use:
+```python
+python3 scripts/convert_pt_to_safetensors.py /path/to/model.pt /path/to/model.safetensors
+```
+
+## Tokenizer setup
+
+The CorPipe checkpoint contains the model weights, `options.json`, and `tags.txt`, but the tokenizer must be downloaded separately. Although the base checkpoint uses `google/umt5-base` as the encoder, the original CorPipe Python implementation uses the tokenizer from `google/umt5-xl` for all UMT5-based models. To reproduce the Python preprocessing exactly, the Rust implementation must therefore use the `google/umt5-xl` tokenizer, not the `google/umt5-base` tokenizer.
+
+Download the tokenizer files with:
+
+```sh
+mkdir -p /<path>/umt5-xl-tokenizer
+
+huggingface-cli download google/umt5-xl \
+  tokenizer.json tokenizer_config.json special_tokens_map.json spiece.model \
+  --local-dir /<path>/umt5-xl-tokenizer
+```
+
 ## Attribution
 
 This work is based on the upstream CorPipe 25 repository:
