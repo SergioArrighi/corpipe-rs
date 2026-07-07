@@ -303,7 +303,6 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "clap",
- "safetensors",
  "serde",
  "serde_json",
  "tokenizers 0.23.1",
