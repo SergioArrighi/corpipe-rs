@@ -5,6 +5,10 @@ edition = "2024"
 description = "CorPipe coreference analysis library and CLI"
 license = "MPL-2.0"
 readme = "README.md"
+repository = "https://github.com/SergioArrighi/corpipe-rss"
+homepage = "https://github.com/SergioArrighi/corpipe-rs"
+keywords = ["nlp", "coreference", "conllu", "udpipe"]
+categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 anyhow = "1.0.103"
