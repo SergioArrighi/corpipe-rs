@@ -9,7 +9,9 @@ const DEFAULT_DEPTH: usize = 5;
 pub(crate) struct Decoder {
     depth: usize,
     tags: Vec<String>,
-    allowed_transitions: Vec<Vec<bool>>,
+    predecessor_states: Vec<Vec<usize>>,
+    can_start_in_state: Vec<bool>,
+    can_end_to_boundary: Vec<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +45,9 @@ impl Decoder {
 
         Ok(Self {
             depth,
-            allowed_transitions: Self::build_allowed_transitions(&tags, depth),
+            predecessor_states: Self::build_predecessor_states(&tags, depth),
+            can_start_in_state: Self::build_start_states(&tags, depth),
+            can_end_to_boundary: Self::build_end_states(&tags, depth),
             tags,
         })
     }
@@ -63,7 +67,7 @@ impl Decoder {
         let neg_inf = -1.0e9_f32;
 
         assert_eq!(valid_mask.len(), num_words);
-        assert_eq!(self.allowed_transitions.len(), num_states);
+        assert_eq!(self.predecessor_states.len(), num_states);
 
         let mut alpha = vec![vec![neg_inf; num_states]; num_words];
         let mut beta = vec![vec![0usize; num_states]; num_words];
@@ -77,11 +81,11 @@ impl Decoder {
                     score = neg_inf;
                 }
 
-                if t == 0 && !self.allowed_transitions[0][state] {
+                if t == 0 && !self.can_start_in_state[state] {
                     score = neg_inf;
                 }
 
-                if t == num_words - 1 && !self.allowed_transitions[state][0] {
+                if t == num_words - 1 && !self.can_end_to_boundary[state] {
                     score = neg_inf;
                 }
 
@@ -93,13 +97,11 @@ impl Decoder {
                 let mut best_prev = 0usize;
                 let mut best_score = neg_inf;
 
-                for prev in 0..num_states {
-                    if self.allowed_transitions[prev][state] {
-                        let candidate = alpha[t - 1][prev];
-                        if candidate > best_score {
-                            best_score = candidate;
-                            best_prev = prev;
-                        }
+                for &prev in &self.predecessor_states[state] {
+                    let candidate = alpha[t - 1][prev];
+                    if candidate > best_score {
+                        best_score = candidate;
+                        best_prev = prev;
                     }
                 }
 
@@ -241,22 +243,52 @@ impl Decoder {
         }
     }
 
-    fn build_allowed_transitions(tags: &[String], depth: usize) -> Vec<Vec<bool>> {
+    fn build_predecessor_states(tags: &[String], depth: usize) -> Vec<Vec<usize>> {
         let state_count = tags.len() * depth;
-        let mut allowed = vec![vec![false; state_count]; state_count];
+        let states_by_depth = Self::states_by_depth(tags.len(), depth);
+        let mut predecessors = vec![Vec::new(); state_count];
 
-        for current_state in 0..state_count {
-            let current_depth = current_state / tags.len();
-            let current_tag = &tags[current_state % tags.len()];
-            let next_depth = Self::apply_tag_to_depth(current_depth as isize, current_tag);
+        for previous_state in 0..state_count {
+            let previous_depth = previous_state / tags.len();
+            let previous_tag = &tags[previous_state % tags.len()];
+            let next_depth = Self::apply_tag_to_depth(previous_depth as isize, previous_tag);
 
-            for next_state in 0..state_count {
-                let expected_depth = next_state / tags.len();
-                allowed[current_state][next_state] = next_depth == expected_depth as isize;
+            if let Ok(next_depth) = usize::try_from(next_depth) {
+                if let Some(states) = states_by_depth.get(next_depth) {
+                    for &next_state in states {
+                        predecessors[next_state].push(previous_state);
+                    }
+                }
             }
         }
 
-        allowed
+        predecessors
+    }
+
+    fn build_start_states(tags: &[String], depth: usize) -> Vec<bool> {
+        let state_count = tags.len() * depth;
+        (0..state_count)
+            .map(|state| state / tags.len() == 0)
+            .collect()
+    }
+
+    fn build_end_states(tags: &[String], depth: usize) -> Vec<bool> {
+        let state_count = tags.len() * depth;
+        (0..state_count)
+            .map(|state| {
+                let state_depth = state / tags.len();
+                let state_tag = &tags[state % tags.len()];
+                Self::apply_tag_to_depth(state_depth as isize, state_tag) == 0
+            })
+            .collect()
+    }
+
+    fn states_by_depth(num_tags: usize, depth: usize) -> Vec<Vec<usize>> {
+        let mut states_by_depth = vec![Vec::with_capacity(num_tags); depth];
+        for state in 0..(num_tags * depth) {
+            states_by_depth[state / num_tags].push(state);
+        }
+        states_by_depth
     }
 
     fn apply_tag_to_depth(mut depth: isize, tag: &str) -> isize {
@@ -299,7 +331,9 @@ mod tests {
 
     fn decoder(tags: Vec<String>, depth: usize) -> Decoder {
         Decoder {
-            allowed_transitions: Decoder::build_allowed_transitions(&tags, depth),
+            predecessor_states: Decoder::build_predecessor_states(&tags, depth),
+            can_start_in_state: Decoder::build_start_states(&tags, depth),
+            can_end_to_boundary: Decoder::build_end_states(&tags, depth),
             depth,
             tags,
         }

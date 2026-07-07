@@ -16,6 +16,24 @@ This crate currently focuses on inference.
 - It provides a thin CLI equivalent of the current `predict-text-real-encoder` command.
 - It does not attempt to replace the full upstream training, evaluation, or experiment-management workflow from `ufal/crac2025-corpipe`.
 
+## System Requirements
+
+Practical runtime requirements for the current CPU inference path:
+
+- 64-bit Linux or another 64-bit environment supported by the Rust dependencies
+- CPU execution only; no GPU is required
+- about **2.52 GiB peak RAM** per inference process with the current measured setup
+- at least **4 GiB free RAM** recommended for comfortable single-process use
+- about **1.14 GiB** of model assets for the measured configuration, plus small UDPipe and tokenizer files
+
+The `2.52 GiB` figure was measured on the release CLI with:
+
+- `corpipe25-base/model.safetensors` at `1.194 GB` on disk
+- `umt5-xl-tokenizer/tokenizer.json` at `16.1 MiB`
+- `english-gum-ud-2.5-191206.udpipe` at `8.5 MiB`
+
+Actual memory use will vary with the selected model, tokenizer, allocator behavior, and host paging state, but this is a good working estimate for the current setup.
+
 ## Requirements
 
 You need external model assets that are not bundled in this repository:

@@ -55,17 +55,14 @@ impl CorpipeAnalyzer {
         }
 
         let model_input = self.tokenizer.build_input(&tokens)?;
-        let embeddings = self.runtime.encode_input(&model_input.input_ids)?;
-        let word_embeddings = self
-            .runtime
-            .gather_word_embeddings(&embeddings, &model_input.word_indices)?;
-        let tag_logits = self.runtime.tag_logits(&word_embeddings)?;
-        let logits_matrix = tag_logits.squeeze(0)?.to_vec2::<f32>()?;
-        let valid_mask = vec![true; tokens.len()];
-        let predicted_tag_ids = self.decoder.decode(&logits_matrix, &valid_mask);
-        let mentions = self.decoder.mentions(&predicted_tag_ids);
-        let resolved_mentions =
-            self.resolve_mentions(&embeddings, &model_input.word_indices, &mentions)?;
+        let runtime = &self.runtime;
+        let decoder = &self.decoder;
+        let input_ids = &model_input.input_ids;
+        let word_indices = &model_input.word_indices;
+        let token_count = tokens.len();
+        let (predicted_tag_ids, mentions, resolved_mentions) = runtime.with_context(move || {
+            run_runtime_phase(runtime, decoder, input_ids, word_indices, token_count)
+        })?;
 
         self.decoder
             .annotate_tokens(&mut tokens, &resolved_mentions);
@@ -77,35 +74,6 @@ impl CorpipeAnalyzer {
             mentions,
             resolved_mentions,
         })
-    }
-
-    fn resolve_mentions(
-        &self,
-        embeddings: &Tensor,
-        word_indices: &[usize],
-        mentions: &[MentionSpan],
-    ) -> Result<Vec<ResolvedMention>> {
-        if mentions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let subword_mentions: Vec<(usize, usize)> = mentions
-            .iter()
-            .map(|mention| {
-                (
-                    word_indices[mention.start],
-                    word_indices[mention.end + 1] - 1,
-                )
-            })
-            .collect();
-
-        let scores = self
-            .runtime
-            .antecedent_scores(embeddings, &subword_mentions, &subword_mentions)?
-            .squeeze(0)?
-            .to_vec2::<f32>()?;
-
-        Ok(self.decoder.resolve_antecedents(mentions, &scores))
     }
 }
 
@@ -151,17 +119,21 @@ impl AnalyzerTokenizer {
     }
 
     fn build_input(&self, tokens: &[Token]) -> Result<ModelInput> {
-        let mut subwords = Vec::new();
+        let token_texts: Vec<&str> = tokens.iter().map(|token| token.form.as_str()).collect();
+        let encodings = self
+            .tokenizer
+            .encode_batch_fast(token_texts, false)
+            .map_err(|error| anyhow::anyhow!("failed to tokenize token batch: {error}"))?;
+
+        let total_subwords: usize = encodings
+            .iter()
+            .map(|encoding| encoding.get_ids().len())
+            .sum();
+        let mut subwords = Vec::with_capacity(total_subwords);
         let mut word_indices = Vec::with_capacity(tokens.len() + 1);
 
-        for token in tokens {
+        for (token, encoding) in tokens.iter().zip(encodings.iter()) {
             word_indices.push(subwords.len());
-
-            let encoding = self
-                .tokenizer
-                .encode(token.form.as_str(), false)
-                .map_err(|error| anyhow::anyhow!("failed to tokenize {:?}: {error}", token.form))?;
-
             let ids = encoding.get_ids();
             anyhow::ensure!(
                 !ids.is_empty(),
@@ -196,4 +168,53 @@ struct ModelInput {
 struct SpecialTokenIds {
     cls: u32,
     sep: u32,
+}
+
+fn run_runtime_phase(
+    runtime: &CorpipeRuntime,
+    decoder: &Decoder,
+    input_ids: &[u32],
+    word_indices: &[usize],
+    token_count: usize,
+) -> Result<(Vec<usize>, Vec<MentionSpan>, Vec<ResolvedMention>)> {
+    let embeddings = runtime.encode_input(input_ids)?;
+    let word_embeddings = runtime.gather_word_embeddings(&embeddings, word_indices)?;
+    let tag_logits = runtime.tag_logits(&word_embeddings)?;
+    let logits_matrix = tag_logits.squeeze(0)?.to_vec2::<f32>()?;
+    let valid_mask = vec![true; token_count];
+    let predicted_tag_ids = decoder.decode(&logits_matrix, &valid_mask);
+    let mentions = decoder.mentions(&predicted_tag_ids);
+    let resolved_mentions =
+        resolve_mentions(runtime, decoder, &embeddings, word_indices, &mentions)?;
+
+    Ok((predicted_tag_ids, mentions, resolved_mentions))
+}
+
+fn resolve_mentions(
+    runtime: &CorpipeRuntime,
+    decoder: &Decoder,
+    embeddings: &Tensor,
+    word_indices: &[usize],
+    mentions: &[MentionSpan],
+) -> Result<Vec<ResolvedMention>> {
+    if mentions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let subword_mentions: Vec<(usize, usize)> = mentions
+        .iter()
+        .map(|mention| {
+            (
+                word_indices[mention.start],
+                word_indices[mention.end + 1] - 1,
+            )
+        })
+        .collect();
+
+    let scores = runtime
+        .antecedent_scores(embeddings, &subword_mentions, &subword_mentions)?
+        .squeeze(0)?
+        .to_vec2::<f32>()?;
+
+    Ok(decoder.resolve_antecedents(mentions, &scores))
 }

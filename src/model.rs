@@ -41,6 +41,14 @@ impl CorpipeRuntime {
         self.encoder.forward(input_ids)
     }
 
+    pub(crate) fn with_context<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.encoder.device().with_context(f)
+    }
+
     pub(crate) fn gather_word_embeddings(
         &self,
         embeddings: &Tensor,
@@ -97,9 +105,11 @@ impl CorpipeEncoder {
 
     fn forward(&self, input_ids: &[u32]) -> Result<Tensor> {
         let mut hidden = self.embedding_lookup(input_ids)?;
+        let attention_buckets =
+            RelativeAttentionBuckets::for_seq_len(hidden.dims()[1], hidden.device())?;
 
         for layer in &self.layers {
-            hidden = layer.forward(&hidden)?;
+            hidden = layer.forward(&hidden, &attention_buckets)?;
         }
 
         TensorOps::rms_norm(&hidden, &self.final_layer_norm, RMS_NORM_EPS)
@@ -120,6 +130,10 @@ impl CorpipeEncoder {
             .unsqueeze(0)
             .with_context(|| "embedding unsqueeze failed")
     }
+
+    fn device(&self) -> &Device {
+        self.embed_weight.device()
+    }
 }
 
 struct EncoderLayer {
@@ -135,8 +149,12 @@ impl EncoderLayer {
         })
     }
 
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let attended = self.attention.forward(input)?;
+    fn forward(
+        &self,
+        input: &Tensor,
+        attention_buckets: &RelativeAttentionBuckets,
+    ) -> Result<Tensor> {
+        let attended = self.attention.forward(input, attention_buckets)?;
         self.feed_forward.forward(&attended)
     }
 }
@@ -197,7 +215,11 @@ impl SelfAttentionBlock {
         })
     }
 
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+    fn forward(
+        &self,
+        input: &Tensor,
+        attention_buckets: &RelativeAttentionBuckets,
+    ) -> Result<Tensor> {
         let normed = TensorOps::rms_norm(input, &self.layer_norm, RMS_NORM_EPS)?;
         let q = TensorOps::split_heads(
             &TensorOps::linear_no_bias_forward(&normed, &self.q_weight)?,
@@ -216,7 +238,7 @@ impl SelfAttentionBlock {
         )?;
 
         let scores = q.matmul(&k.transpose(2, 3)?)?;
-        let bias = self.relative_attention_bias(input.dims()[1])?;
+        let bias = self.relative_attention_bias(attention_buckets)?;
         let probabilities = TensorOps::softmax_last_dim(&scores.broadcast_add(&bias)?)?;
         let context = TensorOps::merge_heads(&probabilities.matmul(&v)?)?;
         let projected = TensorOps::linear_no_bias_forward(&context, &self.o_weight)?;
@@ -229,29 +251,18 @@ impl SelfAttentionBlock {
         })
     }
 
-    fn relative_attention_bias(&self, seq_len: usize) -> Result<Tensor> {
-        let mut bucket_ids = Vec::with_capacity(seq_len * seq_len);
-
-        for query_position in 0..seq_len {
-            for key_position in 0..seq_len {
-                bucket_ids.push(Self::relative_position_bucket(
-                    query_position as isize - key_position as isize,
-                ) as u32);
-            }
-        }
-
+    fn relative_attention_bias(
+        &self,
+        attention_buckets: &RelativeAttentionBuckets,
+    ) -> Result<Tensor> {
         self.relative_attention_bias_weight
-            .index_select(
-                &Tensor::from_vec(
-                    bucket_ids,
-                    (seq_len * seq_len,),
-                    self.relative_attention_bias_weight.device(),
-                )
-                .with_context(|| "failed to create relative bucket tensor")?,
-                0,
-            )
+            .index_select(&attention_buckets.bucket_ids, 0)
             .with_context(|| "relative bias index_select failed")?
-            .reshape((seq_len, seq_len, NUM_HEADS))
+            .reshape((
+                attention_buckets.seq_len,
+                attention_buckets.seq_len,
+                NUM_HEADS,
+            ))
             .with_context(|| "relative bias reshape failed")?
             .permute((2, 0, 1))
             .with_context(|| "relative bias permute failed")?
@@ -284,6 +295,33 @@ impl SelfAttentionBlock {
                 * ((num_buckets_half as f64) - max_exact)) as usize;
 
         bucket + value.min(num_buckets_half - 1)
+    }
+}
+
+struct RelativeAttentionBuckets {
+    seq_len: usize,
+    bucket_ids: Tensor,
+}
+
+impl RelativeAttentionBuckets {
+    fn for_seq_len(seq_len: usize, device: &Device) -> Result<Self> {
+        let mut bucket_ids = Vec::with_capacity(seq_len * seq_len);
+
+        for query_position in 0..seq_len {
+            for key_position in 0..seq_len {
+                bucket_ids.push(SelfAttentionBlock::relative_position_bucket(
+                    query_position as isize - key_position as isize,
+                ) as u32);
+            }
+        }
+
+        let bucket_ids = Tensor::from_vec(bucket_ids, (seq_len * seq_len,), device)
+            .with_context(|| "failed to create relative bucket tensor")?;
+
+        Ok(Self {
+            seq_len,
+            bucket_ids,
+        })
     }
 }
 
@@ -409,8 +447,13 @@ impl CorpipeHeads {
         current_mentions: &[(usize, usize)],
     ) -> Result<Tensor> {
         let batched = BatchedEmbeddings::new(embeddings);
+        let shared_mentions = std::ptr::eq(all_mentions, current_mentions);
         let all_embeddings = batched.gather_mention_embeddings(all_mentions)?;
-        let current_embeddings = batched.gather_mention_embeddings(current_mentions)?;
+        let current_embeddings = if shared_mentions {
+            all_embeddings.clone()
+        } else {
+            batched.gather_mention_embeddings(current_mentions)?
+        };
 
         let keys = self
             .dense_k
@@ -480,7 +523,8 @@ impl<'a> BatchedEmbeddings<'a> {
 
     fn flattened_position(&self, index: usize) -> Result<Tensor> {
         self.embeddings
-            .get(0)?
+            .get(0)
+            .with_context(|| "failed to select embedding batch 0")?
             .get(index)?
             .flatten_all()
             .with_context(|| format!("failed to flatten embedding at position {index}"))
@@ -513,21 +557,7 @@ impl TensorOps {
     }
 
     fn gelu(input: &Tensor) -> Result<Tensor> {
-        let coefficient = (2.0_f64 / std::f64::consts::PI).sqrt();
-
-        let x3 = input
-            .sqr()
-            .with_context(|| "gelu sqr failed")?
-            .mul(input)
-            .with_context(|| "gelu x^3 failed")?;
-
-        let inner = ((input + (x3 * 0.044715)?)? * coefficient)
-            .with_context(|| "gelu inner scale failed")?;
-        let one_plus_tanh = (inner.tanh().with_context(|| "gelu tanh failed")? + 1.0)?;
-
-        (input * 0.5)?
-            .mul(&one_plus_tanh)
-            .with_context(|| "gelu final multiply failed")
+        input.gelu().with_context(|| "gelu fused op failed")
     }
 
     fn linear_no_bias_forward(input: &Tensor, weight: &Tensor) -> Result<Tensor> {
