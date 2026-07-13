@@ -32,20 +32,23 @@ struct AnalyzeArgs {
     text: String,
 }
 
+impl Cli {
+    fn run(self) -> Result<()> {
+        let Command::PredictTextRealEncoder(args) = self.command;
+
+        let analyzer = CorpipeAnalyzer::load(AnalyzerConfig {
+            model_dir: args.model_dir,
+            udpipe_model: args.udpipe_model,
+            tokenizer_json: args.tokenizer_json,
+        })?;
+
+        let analysis = analyzer.analyze(&args.text)?;
+        print!("{}", analysis.to_conllu());
+
+        Ok(())
+    }
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let args = match cli.command {
-        Command::PredictTextRealEncoder(args) => args,
-    };
-
-    let analyzer = CorpipeAnalyzer::load(AnalyzerConfig {
-        model_dir: args.model_dir,
-        udpipe_model: args.udpipe_model,
-        tokenizer_json: args.tokenizer_json,
-    })?;
-
-    let analysis = analyzer.analyze(&args.text)?;
-    print!("{}", analysis.to_conllu());
-
-    Ok(())
+    Cli::parse().run()
 }

@@ -27,7 +27,11 @@ impl CorpipeRuntime {
         let device = Device::Cpu;
 
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(
+                std::slice::from_ref(&weights_path),
+                DType::F32,
+                &device,
+            )
         }
         .with_context(|| format!("failed to load {}", weights_path.display()))?;
 
@@ -279,7 +283,7 @@ impl SelfAttentionBlock {
             bucket += num_buckets_half;
         }
 
-        let distance = relative_position.abs() as usize;
+        let distance = relative_position.unsigned_abs();
         let max_exact = num_buckets_half / 2;
 
         if distance < max_exact {

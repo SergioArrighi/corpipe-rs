@@ -188,7 +188,7 @@ impl Decoder {
 
         for (index, mention) in mentions.iter().enumerate() {
             assert!(
-                scores[index].len() >= index + 1,
+                scores[index].len() > index,
                 "score row {index} must have at least {} entries",
                 index + 1,
             );
@@ -196,9 +196,9 @@ impl Decoder {
             let mut best_antecedent = 0usize;
             let mut best_score = f32::NEG_INFINITY;
 
-            for candidate in 0..=index {
-                if scores[index][candidate] > best_score {
-                    best_score = scores[index][candidate];
+            for (candidate, &candidate_score) in scores[index].iter().take(index + 1).enumerate() {
+                if candidate_score > best_score {
+                    best_score = candidate_score;
                     best_antecedent = candidate;
                 }
             }
@@ -253,11 +253,11 @@ impl Decoder {
             let previous_tag = &tags[previous_state % tags.len()];
             let next_depth = Self::apply_tag_to_depth(previous_depth as isize, previous_tag);
 
-            if let Ok(next_depth) = usize::try_from(next_depth) {
-                if let Some(states) = states_by_depth.get(next_depth) {
-                    for &next_state in states {
-                        predecessors[next_state].push(previous_state);
-                    }
+            if let Ok(next_depth) = usize::try_from(next_depth)
+                && let Some(states) = states_by_depth.get(next_depth)
+            {
+                for &next_state in states {
+                    predecessors[next_state].push(previous_state);
                 }
             }
         }
@@ -313,35 +313,39 @@ mod tests {
     use super::Decoder;
     use crate::{MentionSpan, ResolvedMention, Token};
 
-    fn token() -> Token {
-        Token {
-            sentence_index: 0,
-            id: 1,
-            form: "Alice".to_string(),
-            lemma: "Alice".to_string(),
-            upos: "PROPN".to_string(),
-            xpos: "NNP".to_string(),
-            feats: "_".to_string(),
-            head: 0,
-            deprel: "root".to_string(),
-            deps: "_".to_string(),
-            misc: "_".to_string(),
-        }
-    }
+    struct DecoderTestFixtures;
 
-    fn decoder(tags: Vec<String>, depth: usize) -> Decoder {
-        Decoder {
-            predecessor_states: Decoder::build_predecessor_states(&tags, depth),
-            can_start_in_state: Decoder::build_start_states(&tags, depth),
-            can_end_to_boundary: Decoder::build_end_states(&tags, depth),
-            depth,
-            tags,
+    impl DecoderTestFixtures {
+        fn token() -> Token {
+            Token {
+                sentence_index: 0,
+                id: 1,
+                form: "Alice".to_string(),
+                lemma: "Alice".to_string(),
+                upos: "PROPN".to_string(),
+                xpos: "NNP".to_string(),
+                feats: "_".to_string(),
+                head: 0,
+                deprel: "root".to_string(),
+                deps: "_".to_string(),
+                misc: "_".to_string(),
+            }
+        }
+
+        fn decoder(tags: Vec<String>, depth: usize) -> Decoder {
+            Decoder {
+                predecessor_states: Decoder::build_predecessor_states(&tags, depth),
+                can_start_in_state: Decoder::build_start_states(&tags, depth),
+                can_end_to_boundary: Decoder::build_end_states(&tags, depth),
+                depth,
+                tags,
+            }
         }
     }
 
     #[test]
     fn decoder_recovers_synthetic_mention_sequence() {
-        let decoder = decoder(
+        let decoder = DecoderTestFixtures::decoder(
             vec!["".to_string(), "PUSH".to_string(), "POP:1".to_string()],
             5,
         );
@@ -361,7 +365,7 @@ mod tests {
 
     #[test]
     fn antecedent_resolution_reuses_prior_entity() {
-        let decoder = decoder(vec!["".to_string()], 5);
+        let decoder = DecoderTestFixtures::decoder(vec!["".to_string()], 5);
         let mentions = vec![
             MentionSpan { start: 0, end: 0 },
             MentionSpan { start: 2, end: 2 },
@@ -392,8 +396,12 @@ mod tests {
 
     #[test]
     fn entity_markers_are_written_in_place() {
-        let decoder = decoder(vec!["".to_string()], 5);
-        let mut tokens = vec![token(), token(), token()];
+        let decoder = DecoderTestFixtures::decoder(vec!["".to_string()], 5);
+        let mut tokens = vec![
+            DecoderTestFixtures::token(),
+            DecoderTestFixtures::token(),
+            DecoderTestFixtures::token(),
+        ];
         let resolved = vec![
             ResolvedMention {
                 span: MentionSpan { start: 0, end: 0 },

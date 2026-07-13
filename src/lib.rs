@@ -3,6 +3,11 @@ mod decode;
 mod model;
 mod render;
 mod types;
+mod udpipe;
 
-pub use analyzer::{CorpipeAnalyzer, analyze_text};
-pub use types::{AnalysisResult, AnalyzerConfig, MentionSpan, ResolvedMention, Token};
+pub use analyzer::{CoreferenceAnalyzer, CorpipeAnalyzer};
+pub use types::{
+    AnalysisResult, AnalyzerConfig, CoreferenceConfig, MentionSpan, ResolvedMention, Token,
+    UdpipeDocument,
+};
+pub use udpipe::UdpipeParser;

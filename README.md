@@ -73,6 +73,136 @@ The library returns an `AnalysisResult` with:
 - extracted mention spans
 - resolved mentions with entity ids
 
+### Supplying UDPipe data as input
+
+The library API can now run the neural CorPipe stage over an existing `UdpipeDocument`. This is useful when an application already runs UDPipe, needs to persist or publish the dependency parse before coreference, or wants several consumers to share one parse. The CLI continues to accept raw text; pre-parsed UDPipe input is currently a library API.
+
+There are three ways to obtain the document.
+
+#### Parse once with the complete analyzer
+
+The complete analyzer can expose its UDPipe result before coreference. `analyze_udpipe` consumes that exact document and does not parse the text again:
+
+```rust
+let ud_document = analyzer.parse_udpipe("Mark is part of the Milan soccer team.")?;
+
+// Publish, persist, or inspect `ud_document` here.
+
+let result = analyzer.analyze_udpipe(&ud_document)?;
+```
+
+#### Supply words from `udpipe-rs`
+
+Applications that own their UDPipe model can normalize `udpipe_rs::Word` values directly:
+
+```rust
+use corpipe_rs::UdpipeDocument;
+
+let words = udpipe_model.parse(text)?;
+let ud_document = UdpipeDocument::from_words(text, &words);
+```
+
+`Token::from_word` is also public when an application needs to control document assembly itself.
+
+#### Construct or deserialize a document
+
+`UdpipeDocument` and `Token` implement Serde serialization and deserialization, so a parse can cross a process or storage boundary before CorPipe consumes it:
+
+```rust
+use corpipe_rs::UdpipeDocument;
+
+let ud_document: UdpipeDocument = serde_json::from_str(&stored_udpipe_json)?;
+ud_document.validate()?;
+```
+
+The serialized shape is:
+
+```json
+{
+  "text": "Mark trains.",
+  "tokens": [
+    {
+      "sentence_index": 0,
+      "id": 1,
+      "form": "Mark",
+      "lemma": "Mark",
+      "upos": "PROPN",
+      "xpos": "NNP",
+      "feats": "_",
+      "head": 2,
+      "deprel": "nsubj",
+      "deps": "_",
+      "misc": "_"
+    },
+    {
+      "sentence_index": 0,
+      "id": 2,
+      "form": "trains",
+      "lemma": "train",
+      "upos": "VERB",
+      "xpos": "VBZ",
+      "feats": "_",
+      "head": 0,
+      "deprel": "root",
+      "deps": "_",
+      "misc": "SpaceAfter=No"
+    },
+    {
+      "sentence_index": 0,
+      "id": 3,
+      "form": ".",
+      "lemma": ".",
+      "upos": "PUNCT",
+      "xpos": ".",
+      "feats": "_",
+      "head": 2,
+      "deprel": "punct",
+      "deps": "_",
+      "misc": "_"
+    }
+  ]
+}
+```
+
+Before inference, validation requires:
+
+- zero-based, consecutive `sentence_index` values
+- one-based, consecutive token `id` values within each sentence
+- non-empty token forms
+- dependency heads that are `0` for a root or identify a token in the same sentence
+- no negative, missing, or self-referential dependency heads
+
+Empty documents are valid and produce an empty `AnalysisResult`.
+
+### Loading only the CorPipe stage
+
+When UDPipe is managed elsewhere, load `CoreferenceAnalyzer` with no UDPipe model path:
+
+```rust
+use corpipe_rs::{CoreferenceAnalyzer, CoreferenceConfig, UdpipeDocument};
+use std::path::PathBuf;
+
+let coreference = CoreferenceAnalyzer::load(CoreferenceConfig {
+    model_dir: PathBuf::from("/path/to/corpipe-model"),
+    tokenizer_json: PathBuf::from("/path/to/tokenizer.json"),
+})?;
+let ud_document: UdpipeDocument = obtain_udpipe_document();
+let result = coreference.analyze(&ud_document)?;
+```
+
+`CoreferenceAnalyzer::analyze` borrows the input document. It clones the tokens for the result and writes CorefUD `Entity` markers only to those result tokens, leaving the caller's UDPipe document unchanged.
+
+### Current implementation architecture
+
+The current 0.2.x implementation separates parsing from neural coreference:
+
+1. `UdpipeParser` owns the `udpipe-rs` model and produces a reusable `UdpipeDocument`.
+2. `CoreferenceAnalyzer` validates the document, tokenizes its forms, runs the Candle encoder and CorPipe neural heads, validates neural output shapes and finite scores, decodes mention tags, and resolves antecedents.
+3. The decoder annotates a cloned token list with CorefUD entity markers and returns `AnalysisResult`.
+4. `CorpipeAnalyzer` composes both stages. Its `analyze(text)` method is equivalent to `parse_udpipe(text)` followed by `analyze_udpipe(document)`.
+
+All pipeline behavior is owned by these analyzer and document types rather than module-level helper functions. For single-use callers, `CorpipeAnalyzer::analyze_text(config, text)` loads and runs the composed analyzer in one call; reuse a loaded analyzer for multiple documents to avoid repeatedly loading model assets.
+
 ## CLI Usage
 
 Run the current inference command like this:
@@ -91,6 +221,8 @@ The CLI writes CorefUD-style CONLL-U to stdout.
 
 - `src/lib.rs`: public crate surface
 - `src/analyzer.rs`: high-level text analysis pipeline
+- `src/udpipe.rs`: reusable UDPipe parser stage
+- `src/types.rs`: serializable input and output contracts
 - `src/model.rs`: encoder and neural head runtime
 - `src/decode.rs`: tag decoding, mention extraction, and antecedent resolution
 - `src/render.rs`: CONLL-U rendering
